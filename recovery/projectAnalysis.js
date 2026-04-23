@@ -5,7 +5,22 @@ const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.cache',
   'tmp', 'temp', '__pycache__', '.venv', 'venv', 'target', 'out', '.idea', '.vscode'
 ]);
-const CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+
+const IMPORT_CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+const CODE_EXTS = new Set([
+  ...IMPORT_CODE_EXTS,
+  '.java', '.kt', '.kts', '.py', '.rb', '.php', '.cs', '.go', '.rs', '.c', '.cc', '.cpp', '.h', '.hpp', '.swift'
+]);
+const TEXT_EXTS = new Set([
+  ...CODE_EXTS,
+  '.json', '.md', '.yml', '.yaml', '.txt', '.ps1', '.cmd', '.toml', '.xml', '.properties',
+  '.gradle', '.html', '.css', '.scss', '.ini', '.cfg', '.env'
+]);
+const MANIFEST_FILES = new Set([
+  'package.json', 'tsconfig.json', 'bunfig.toml', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+  'requirements.txt', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'composer.json', 'Gemfile',
+  'settings.gradle', 'settings.gradle.kts'
+]);
 const IGNORE_ERR_CODES = new Set(['EPERM', 'EACCES', 'ENOENT', 'ENOTDIR', 'EBUSY']);
 
 function clip(text, max = 30000) {
@@ -23,10 +38,9 @@ async function exists(p) {
 }
 
 function shouldSkipDir(name) {
-  const lower = name.toLowerCase();
+  const lower = String(name || '').toLowerCase();
   if (SKIP_DIRS.has(name) || SKIP_DIRS.has(lower)) return true;
-  if (lower.startsWith('tmp') || lower.startsWith('temp')) return true;
-  return false;
+  return lower.startsWith('tmp') || lower.startsWith('temp');
 }
 
 function isIgnorableFsError(error) {
@@ -69,8 +83,7 @@ async function walk(rootDir) {
 }
 
 function isTextCandidate(file) {
-  const ext = path.extname(file).toLowerCase();
-  return CODE_EXTS.has(ext) || ['.json', '.md', '.yml', '.yaml', '.txt', '.ps1', '.cmd', '.toml', '.java', '.kt', '.xml', '.properties', '.gradle'].includes(ext);
+  return TEXT_EXTS.has(path.extname(file).toLowerCase());
 }
 
 function sortObjectEntries(obj, limit = 20) {
@@ -87,9 +100,7 @@ function parseImports(text) {
 
   for (const pattern of patterns) {
     let match;
-    while ((match = pattern.exec(text)) !== null) {
-      imports.push(match[1]);
-    }
+    while ((match = pattern.exec(text)) !== null) imports.push(match[1]);
   }
   return imports;
 }
@@ -115,10 +126,52 @@ async function resolveRelativeImport(sourceFile, spec) {
 async function readTextSafe(file) {
   try {
     return await fs.readFile(file, 'utf8');
-  } catch (error) {
-    if (isIgnorableFsError(error)) return '';
+  } catch {
     return '';
   }
+}
+
+function detectEcosystems(relPath, text, packageJson) {
+  const lower = relPath.toLowerCase();
+  const hits = new Set();
+
+  if (lower.endsWith('pom.xml') || lower.endsWith('.gradle') || lower.endsWith('.gradle.kts')) hits.add('java');
+  if (lower.endsWith('package.json') || lower.endsWith('tsconfig.json') || lower.endsWith('bunfig.toml')) hits.add('node');
+  if (lower.endsWith('pyproject.toml') || lower.endsWith('requirements.txt')) hits.add('python');
+  if (lower.endsWith('cargo.toml')) hits.add('rust');
+  if (lower.endsWith('go.mod')) hits.add('go');
+
+  if (packageJson) {
+    const deps = { ...(packageJson.dependencies || {}), ...(packageJson.devDependencies || {}) };
+    const keys = Object.keys(deps);
+    if (keys.some(key => ['react', 'next', 'vite', 'electron', 'vue', 'svelte'].includes(key))) hits.add('node');
+    if (deps.react) hits.add('react');
+    if (deps.next) hits.add('nextjs');
+    if (deps.vite) hits.add('vite');
+    if (deps.electron) hits.add('electron');
+  }
+
+  if (/spring-boot|org\.springframework|springframework/i.test(text)) hits.add('spring');
+  if (/electron/i.test(text)) hits.add('electron');
+  if (/next\/?dist|next\.config/i.test(text)) hits.add('nextjs');
+  if (/vite/i.test(text) && lower.includes('package.json')) hits.add('vite');
+  if (/react/i.test(text) && lower.includes('package.json')) hits.add('react');
+
+  return Array.from(hits);
+}
+
+function detectEntrypoint(rel) {
+  const lower = rel.toLowerCase();
+  return (
+    lower === 'package.json' ||
+    lower === 'pom.xml' ||
+    lower === 'build.gradle' ||
+    lower === 'build.gradle.kts' ||
+    lower === 'requirements.txt' ||
+    lower === 'pyproject.toml' ||
+    lower === 'cargo.toml' ||
+    /(^|\/)(main|index|setup|queryengine|agent|app|server|manage|cli|program)\.(ts|tsx|js|jsx|java|kt|py|go|rs|cs)$/i.test(lower)
+  );
 }
 
 export async function analyzeProject(rootDir = process.cwd()) {
@@ -130,6 +183,8 @@ export async function analyzeProject(rootDir = process.cwd()) {
   const missingImports = [];
   const missingBySpec = {};
   const missingByDir = {};
+  const manifests = [];
+  const ecosystems = new Set();
 
   for (const file of files) {
     const rel = path.relative(rootDir, file);
@@ -139,21 +194,22 @@ export async function analyzeProject(rootDir = process.cwd()) {
     const top = rel.split(path.sep)[0] || '.';
     dirCounts[top] = (dirCounts[top] || 0) + 1;
 
-    const lower = rel.toLowerCase();
-    if (
-      lower === 'package.json' ||
-      lower === 'bunfig.toml' ||
-      lower === 'tsconfig.json' ||
-      lower === 'pom.xml' ||
-      lower === 'build.gradle' ||
-      lower === 'build.gradle.kts' ||
-      /(^|\/)(main|index|setup|queryengine|agent|app|server)\.(ts|tsx|js|jsx|java|kt)$/.test(lower)
-    ) {
-      entrypoints.push(rel);
+    if (detectEntrypoint(rel)) entrypoints.push(rel);
+
+    const basename = path.basename(file);
+    const text = isTextCandidate(file) ? await readTextSafe(file) : '';
+
+    if (MANIFEST_FILES.has(basename)) {
+      let parsed = null;
+      if (basename === 'package.json' && text) {
+        try { parsed = JSON.parse(text); } catch {}
+      }
+      manifests.push({ path: rel, type: basename, packageName: parsed?.name || null, scripts: Object.keys(parsed?.scripts || {}).slice(0, 15) });
+      for (const hit of detectEcosystems(rel, text, parsed)) ecosystems.add(hit);
+    } else if (text) {
+      for (const hit of detectEcosystems(rel, text, null)) ecosystems.add(hit);
     }
 
-    if (!isTextCandidate(file)) continue;
-    const text = await readTextSafe(file);
     if (!text) continue;
 
     const lines = text.split(/\r?\n/);
@@ -164,7 +220,7 @@ export async function analyzeProject(rootDir = process.cwd()) {
       }
     }
 
-    if (CODE_EXTS.has(ext)) {
+    if (IMPORT_CODE_EXTS.has(ext)) {
       const imports = parseImports(text);
       for (const spec of imports) {
         if (!spec.startsWith('.')) continue;
@@ -179,31 +235,24 @@ export async function analyzeProject(rootDir = process.cwd()) {
     }
   }
 
-  const packageJsonPath = path.join(rootDir, 'package.json');
-  let packageJson = null;
-  if (await exists(packageJsonPath)) {
-    try {
-      packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
-    } catch {
-      packageJson = null;
-    }
-  }
+  const rootManifestTypes = new Set(manifests.filter(item => !item.path.includes(path.sep)).map(item => item.type));
+  const nestedManifestCount = manifests.filter(item => item.path.includes(path.sep)).length;
+  const rootPackageManifest = manifests.find(item => item.path === 'package.json') || null;
 
   const findings = [];
-  if (!packageJson) findings.push('package.json is missing or unreadable.');
-  if (!(await exists(path.join(rootDir, 'tsconfig.json'))) && !(await exists(path.join(rootDir, 'pom.xml'))) && !(await exists(path.join(rootDir, 'build.gradle'))) && !(await exists(path.join(rootDir, 'build.gradle.kts')))) {
-    findings.push('No obvious JS/TS or Java build manifest was found at the project root.');
-  }
+  if (!rootManifestTypes.size) findings.push('No obvious build manifest was found at the repository root.');
+  if (!rootPackageManifest && manifests.length > 0) findings.push(`Root package.json is missing, but ${manifests.length} manifest file(s) were detected under subdirectories.`);
   if (missingImports.length > 0) findings.push(`There are ${missingImports.length} source files with broken relative imports.`);
   if (entrypoints.length === 0) findings.push('No obvious entrypoint files were detected.');
   if (skipped.length > 0) findings.push(`Skipped ${skipped.length} directories that looked temporary, generated, or not accessible.`);
+  if (ecosystems.size > 0) findings.push(`Detected stack signals: ${Array.from(ecosystems).sort().join(', ')}.`);
 
   const plan = [
-    'Phase 1: identify the real app type and primary entrypoint (web, CLI, backend, desktop, or mixed workspace).',
-    'Phase 2: verify root manifests and runnable scripts, then lock one reproducible start command.',
-    'Phase 3: repair missing imports, missing generated files, and compatibility shims in the smallest startup path first.',
+    'Phase 1: pick the primary runnable target by checking detected manifests and entrypoints instead of assuming the repo root is the app root.',
+    'Phase 2: lock one reproducible start path for that target (web, desktop, backend, or CLI).',
+    'Phase 3: repair missing imports and generated files only in that startup path first.',
     'Phase 4: isolate optional integrations behind lazy checks so they do not crash startup.',
-    'Phase 5: run a smoke test for the main target (web dev server, desktop shell, or backend service).'
+    'Phase 5: run a smoke test for the chosen target and document the exact command.'
   ];
 
   return {
@@ -214,18 +263,19 @@ export async function analyzeProject(rootDir = process.cwd()) {
       skippedDirectories: skipped.length,
       codeFiles: files.filter(file => CODE_EXTS.has(path.extname(file).toLowerCase())).length,
       todoCount: todoMatches.length,
-      brokenRelativeImportFiles: missingImports.length
+      brokenRelativeImportFiles: missingImports.length,
+      manifestFiles: manifests.length,
+      nestedManifestFiles: nestedManifestCount
     },
-    package: packageJson ? {
-      name: packageJson.name || null,
-      version: packageJson.version || null,
-      scripts: packageJson.scripts || {},
-      dependencies: Object.keys(packageJson.dependencies || {}).length,
-      devDependencies: Object.keys(packageJson.devDependencies || {}).length
+    rootPackage: rootPackageManifest ? {
+      name: rootPackageManifest.packageName || null,
+      scripts: rootPackageManifest.scripts || []
     } : null,
+    ecosystems: Array.from(ecosystems).sort(),
+    manifests: manifests.slice(0, 80),
     topExtensions: sortObjectEntries(extCounts, 15),
     topDirectories: sortObjectEntries(dirCounts, 15),
-    entrypoints: Array.from(new Set(entrypoints)).sort().slice(0, 40),
+    entrypoints: Array.from(new Set(entrypoints)).sort().slice(0, 60),
     skippedDirectorySamples: skipped.slice(0, 30).map(item => path.relative(rootDir, item)),
     todoSamples: todoMatches.slice(0, 30),
     brokenImportSamples: missingImports.slice(0, 30),
@@ -246,21 +296,33 @@ export function renderAnalysisReport(report, { markdown = false } = {}) {
     lines.push(`- Directories: ${report.totals.directories}`);
     lines.push(`- Skipped directories: ${report.totals.skippedDirectories}`);
     lines.push(`- Code files: ${report.totals.codeFiles}`);
+    lines.push(`- Manifest files: ${report.totals.manifestFiles}`);
     lines.push(`- Broken relative import files: ${report.totals.brokenRelativeImportFiles}`);
     lines.push('');
-    if (report.package) {
-      lines.push('## Package');
+    if (report.rootPackage) {
+      lines.push('## Root package');
       lines.push('');
-      lines.push(`- Name: ${report.package.name || '(none)'}`);
-      lines.push(`- Version: ${report.package.version || '(none)'}`);
-      lines.push(`- Dependencies: ${report.package.dependencies}`);
-      lines.push(`- Dev dependencies: ${report.package.devDependencies}`);
-      lines.push('');
-      if (Object.keys(report.package.scripts).length) {
-        lines.push('### Scripts');
-        for (const [key, value] of Object.entries(report.package.scripts)) lines.push(`- ${key}: ${value}`);
-        lines.push('');
+      lines.push(`- Name: ${report.rootPackage.name || '(none)'}`);
+      if (report.rootPackage.scripts.length) {
+        lines.push('- Scripts:');
+        for (const script of report.rootPackage.scripts) lines.push(`  - ${script}`);
       }
+      lines.push('');
+    }
+    if (report.ecosystems.length) {
+      lines.push('## Detected stack signals');
+      lines.push('');
+      for (const item of report.ecosystems) lines.push(`- ${item}`);
+      lines.push('');
+    }
+    if (report.manifests.length) {
+      lines.push('## Manifest files');
+      lines.push('');
+      for (const item of report.manifests.slice(0, 30)) {
+        const label = item.packageName ? `${item.path} (${item.packageName})` : item.path;
+        lines.push(`- ${label}`);
+      }
+      lines.push('');
     }
     lines.push('## Findings');
     for (const finding of report.findings) lines.push(`- ${finding}`);
@@ -270,7 +332,7 @@ export function renderAnalysisReport(report, { markdown = false } = {}) {
     lines.push('');
     if (report.entrypoints.length) {
       lines.push('## Entrypoints');
-      for (const item of report.entrypoints) lines.push(`- ${item}`);
+      for (const item of report.entrypoints.slice(0, 30)) lines.push(`- ${item}`);
       lines.push('');
     }
     if (report.skippedDirectorySamples.length) {
@@ -290,14 +352,20 @@ export function renderAnalysisReport(report, { markdown = false } = {}) {
   parts.push('Project analysis');
   parts.push(`Root: ${report.rootDir}`);
   parts.push(`Files: ${report.totals.files} | Directories: ${report.totals.directories} | Skipped: ${report.totals.skippedDirectories} | Code files: ${report.totals.codeFiles}`);
-  parts.push(`Broken relative import files: ${report.totals.brokenRelativeImportFiles}`);
+  parts.push(`Manifest files: ${report.totals.manifestFiles} | Broken relative import files: ${report.totals.brokenRelativeImportFiles}`);
 
-  if (report.package) {
+  if (report.ecosystems.length) {
     parts.push('');
-    parts.push('Package');
-    parts.push(`- name: ${report.package.name || '(none)'}`);
-    parts.push(`- version: ${report.package.version || '(none)'}`);
-    parts.push(`- scripts: ${Object.keys(report.package.scripts).length}`);
+    parts.push(`Detected stack signals: ${report.ecosystems.join(', ')}`);
+  }
+
+  if (report.manifests.length) {
+    parts.push('');
+    parts.push('Manifest files');
+    for (const item of report.manifests.slice(0, 15)) {
+      const label = item.packageName ? `${item.path} (${item.packageName})` : item.path;
+      parts.push(`- ${label}`);
+    }
   }
 
   parts.push('');
