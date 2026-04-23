@@ -1,81 +1,202 @@
-/**
- * Shared constants and path builders for MDM settings modules.
- *
- * This module has ZERO heavy imports (only `os`) — safe to use from mdmRawRead.ts.
- * Both mdmRawRead.ts and mdmSettings.ts import from here to avoid duplication.
- */
-
-import { homedir, userInfo } from 'os'
-import { join } from 'path'
-
-/** macOS preference domain for Claude Code MDM profiles. */
-export const MACOS_PREFERENCE_DOMAIN = 'com.anthropic.claudecode'
+import { getAllowedSettingSources } from '../../bootstrap/state.js'
 
 /**
- * Windows registry key paths for Claude Code MDM policies.
- *
- * These keys live under SOFTWARE\Policies which is on the WOW64 shared key
- * list — both 32-bit and 64-bit processes see the same values without
- * redirection. Do not move these to SOFTWARE\ClaudeCode, as SOFTWARE is
- * redirected and 32-bit processes would silently read from WOW6432Node.
- * See: https://learn.microsoft.com/en-us/windows/win32/winprog64/shared-registry-keys
+ * All possible sources where settings can come from
+ * Order matters - later sources override earlier ones
  */
-export const WINDOWS_REGISTRY_KEY_PATH_HKLM =
-  'HKLM\\SOFTWARE\\Policies\\ClaudeCode'
-export const WINDOWS_REGISTRY_KEY_PATH_HKCU =
-  'HKCU\\SOFTWARE\\Policies\\ClaudeCode'
+export const SETTING_SOURCES = [
+  // User settings (global)
+  'userSettings',
 
-/** Windows registry value name containing the JSON settings blob. */
-export const WINDOWS_REGISTRY_VALUE_NAME = 'Settings'
+  // Project settings (shared per-directory)
+  'projectSettings',
 
-/** Path to macOS plutil binary. */
-export const PLUTIL_PATH = '/usr/bin/plutil'
+  // Local settings (gitignored)
+  'localSettings',
 
-/** Arguments for plutil to convert plist to JSON on stdout (append plist path). */
-export const PLUTIL_ARGS_PREFIX = ['-convert', 'json', '-o', '-', '--'] as const
+  // Flag settings (from --settings flag)
+  'flagSettings',
 
-/** Subprocess timeout in milliseconds. */
-export const MDM_SUBPROCESS_TIMEOUT_MS = 5000
+  // Policy settings (managed-settings.json or remote settings from API)
+  'policySettings',
+] as const
 
-/**
- * Build the list of macOS plist paths in priority order (highest first).
- * Evaluates `process.env.USER_TYPE` at call time so ant-only paths are
- * included only when appropriate.
- */
-export function getMacOSPlistPaths(): Array<{ path: string; label: string }> {
-  let username = ''
-  try {
-    username = userInfo().username
-  } catch {
-    // ignore
+export type SettingSource = (typeof SETTING_SOURCES)[number]
+
+export function getSettingSourceName(source: SettingSource): string {
+  switch (source) {
+    case 'userSettings':
+      return 'user'
+    case 'projectSettings':
+      return 'project'
+    case 'localSettings':
+      return 'project, gitignored'
+    case 'flagSettings':
+      return 'cli flag'
+    case 'policySettings':
+      return 'managed'
   }
-
-  const paths: Array<{ path: string; label: string }> = []
-
-  if (username) {
-    paths.push({
-      path: `/Library/Managed Preferences/${username}/${MACOS_PREFERENCE_DOMAIN}.plist`,
-      label: 'per-user managed preferences',
-    })
-  }
-
-  paths.push({
-    path: `/Library/Managed Preferences/${MACOS_PREFERENCE_DOMAIN}.plist`,
-    label: 'device-level managed preferences',
-  })
-
-  // Allow user-writable preferences for local MDM testing in ant builds only.
-  if (process.env.USER_TYPE === 'ant') {
-    paths.push({
-      path: join(
-        homedir(),
-        'Library',
-        'Preferences',
-        `${MACOS_PREFERENCE_DOMAIN}.plist`,
-      ),
-      label: 'user preferences (ant-only)',
-    })
-  }
-
-  return paths
 }
+
+/**
+ * Get short display name for a setting source (capitalized, for context/skills UI)
+ * @param source The setting source or 'plugin'/'built-in'
+ * @returns Short capitalized display name like 'User', 'Project', 'Plugin'
+ */
+export function getSourceDisplayName(
+  source: SettingSource | 'plugin' | 'built-in',
+): string {
+  switch (source) {
+    case 'userSettings':
+      return 'User'
+    case 'projectSettings':
+      return 'Project'
+    case 'localSettings':
+      return 'Local'
+    case 'flagSettings':
+      return 'Flag'
+    case 'policySettings':
+      return 'Managed'
+    case 'plugin':
+      return 'Plugin'
+    case 'built-in':
+      return 'Built-in'
+  }
+}
+
+/**
+ * Get display name for a setting or permission rule source (lowercase, for inline use)
+ * @param source The setting source or permission rule source
+ * @returns Display name for the source in lowercase
+ */
+export function getSettingSourceDisplayNameLowercase(
+  source: SettingSource | 'cliArg' | 'command' | 'session',
+): string {
+  switch (source) {
+    case 'userSettings':
+      return 'user settings'
+    case 'projectSettings':
+      return 'shared project settings'
+    case 'localSettings':
+      return 'project local settings'
+    case 'flagSettings':
+      return 'command line arguments'
+    case 'policySettings':
+      return 'enterprise managed settings'
+    case 'cliArg':
+      return 'CLI argument'
+    case 'command':
+      return 'command configuration'
+    case 'session':
+      return 'current session'
+  }
+}
+
+/**
+ * Get display name for a setting or permission rule source (capitalized, for UI labels)
+ * @param source The setting source or permission rule source
+ * @returns Display name for the source with first letter capitalized
+ */
+export function getSettingSourceDisplayNameCapitalized(
+  source: SettingSource | 'cliArg' | 'command' | 'session',
+): string {
+  switch (source) {
+    case 'userSettings':
+      return 'User settings'
+    case 'projectSettings':
+      return 'Shared project settings'
+    case 'localSettings':
+      return 'Project local settings'
+    case 'flagSettings':
+      return 'Command line arguments'
+    case 'policySettings':
+      return 'Enterprise managed settings'
+    case 'cliArg':
+      return 'CLI argument'
+    case 'command':
+      return 'Command configuration'
+    case 'session':
+      return 'Current session'
+  }
+}
+
+/**
+ * Parse the --setting-sources CLI flag into SettingSource array
+ * @param flag Comma-separated string like "user,project,local"
+ * @returns Array of SettingSource values
+ */
+export function parseSettingSourcesFlag(flag: string): SettingSource[] {
+  if (flag === '') return []
+
+  const names = flag.split(',').map(s => s.trim())
+  const result: SettingSource[] = []
+
+  for (const name of names) {
+    switch (name) {
+      case 'user':
+        result.push('userSettings')
+        break
+      case 'project':
+        result.push('projectSettings')
+        break
+      case 'local':
+        result.push('localSettings')
+        break
+      default:
+        throw new Error(
+          `Invalid setting source: ${name}. Valid options are: user, project, local`,
+        )
+    }
+  }
+
+  return result
+}
+
+/**
+ * Get enabled setting sources with policy/flag always included
+ * @returns Array of enabled SettingSource values
+ */
+export function getEnabledSettingSources(): SettingSource[] {
+  const allowed = getAllowedSettingSources()
+
+  // Always include policy and flag settings
+  const result = new Set<SettingSource>(allowed)
+  result.add('policySettings')
+  result.add('flagSettings')
+  return Array.from(result)
+}
+
+/**
+ * Check if a specific source is enabled
+ * @param source The source to check
+ * @returns true if the source should be loaded
+ */
+export function isSettingSourceEnabled(source: SettingSource): boolean {
+  const enabled = getEnabledSettingSources()
+  return enabled.includes(source)
+}
+
+/**
+ * Editable setting sources (excludes policySettings and flagSettings which are read-only)
+ */
+export type EditableSettingSource = Exclude<
+  SettingSource,
+  'policySettings' | 'flagSettings'
+>
+
+/**
+ * List of sources where permission rules can be saved, in display order.
+ * Used by permission-rule and hook-save UIs to present source options.
+ */
+export const SOURCES = [
+  'localSettings',
+  'projectSettings',
+  'userSettings',
+] as const satisfies readonly EditableSettingSource[]
+
+/**
+ * The JSON Schema URL for Claude Code settings
+ * You can edit the contents at https://github.com/SchemaStore/schemastore/blob/master/src/schemas/json/claude-code-settings.json
+ */
+export const CLAUDE_CODE_SETTINGS_SCHEMA_URL =
+  'https://json.schemastore.org/claude-code-settings.json'

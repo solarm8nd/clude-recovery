@@ -1,9 +1,27 @@
-import MAGIC_PROXY, { createMagicProxy } from '../../../recovery/magicProxy.js';
+import type { SettingSource } from 'src/utils/settings/constants.js'
+import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
 
-const __defaultExport: any = MAGIC_PROXY;
-export default __defaultExport;
+export const AGENT_PATHS = {
+  FOLDER_NAME: '.claude',
+  AGENTS_DIR: 'agents',
+} as const
 
-export type AgentWizardData = any;
-export const AgentWizardData: any = createMagicProxy('AgentWizardData');
+// Base types for common patterns
+type WithPreviousMode = { previousMode: ModeState }
+type WithAgent = { agent: AgentDefinition }
 
-export const __esModule = true;
+// Simplified state type using intersection types
+export type ModeState =
+  | { mode: 'main-menu' }
+  | { mode: 'list-agents'; source: SettingSource | 'all' | 'built-in' }
+  | ({ mode: 'agent-menu' } & WithAgent & WithPreviousMode)
+  | ({ mode: 'view-agent' } & WithAgent & WithPreviousMode)
+  | { mode: 'create-agent' }
+  | ({ mode: 'edit-agent' } & WithAgent & WithPreviousMode)
+  | ({ mode: 'delete-confirm' } & WithAgent & WithPreviousMode)
+
+export type AgentValidationResult = {
+  isValid: boolean
+  warnings: string[]
+  errors: string[]
+}

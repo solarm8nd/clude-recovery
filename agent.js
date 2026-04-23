@@ -80,10 +80,33 @@ Allowed forms:
 Use small safe steps. Prefer inspection before modification.`;
 }
 
+function normalizeBareCommand(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('/')) {
+    if (trimmed === 'pwd') return '/pwd';
+    if (trimmed === 'ls') return '/ls';
+    if (trimmed === 'doctor') return '/doctor';
+    if (trimmed === 'analyze') return '/analyze';
+    if (trimmed.startsWith('cd ')) return '/cd ' + trimmed.slice(3);
+    if (trimmed.startsWith('read ')) return '/read ' + trimmed.slice(5);
+    if (trimmed.startsWith('search ')) return '/search ' + trimmed.slice(7);
+    if (trimmed.startsWith('shell ')) return '/shell ' + trimmed.slice(6);
+  }
+  return trimmed;
+}
+
+function splitPastedCommands(line) {
+  const normalized = line.replace(/\r/g, '');
+  if (normalized.includes('\n')) {
+    return normalized.split('\n').map(item => item.trim()).filter(Boolean);
+  }
+  return [normalized.trim()].filter(Boolean);
+}
+
 async function runModelBackedAgent(userText) {
   let messages = [...history, { role: 'user', content: userText }];
   for (let step = 0; step < MAX_STEPS; step += 1) {
-    const raw = await callLocalModel(messages, systemPrompt());
+    const raw = await callLocalModel(messages, systemPrompt(), cwd);
     const action = extractJson(raw);
 
     if (!action || !action.type) {
@@ -124,7 +147,7 @@ async function runModelBackedAgent(userText) {
 }
 
 async function runAgent(userText) {
-  if (!isLocalModelConfigured()) {
+  if (!isLocalModelConfigured(cwd)) {
     const answer = await answerOfflineQuery(cwd, userText);
     console.log(`\nassistant:\n${answer}\n`);
     return;
@@ -148,9 +171,9 @@ async function handleFeatureCommand(parts) {
     return true;
   }
   if (group === '/bridge') {
-    if (action === 'status') console.log(JSON.stringify(featureApi.bridge.getStatus(), null, 2));
-    else if (action === 'enable') console.log(JSON.stringify(featureApi.bridge.setEnabled(true), null, 2));
-    else if (action === 'disable') console.log(JSON.stringify(featureApi.bridge.setEnabled(false), null, 2));
+    if (action === 'status') console.log(JSON.stringify(featureApi.bridge.getStatus(cwd), null, 2));
+    else if (action === 'enable') console.log(JSON.stringify(featureApi.bridge.setEnabled(true, cwd), null, 2));
+    else if (action === 'disable') console.log(JSON.stringify(featureApi.bridge.setEnabled(false, cwd), null, 2));
     else console.log('usage: /bridge status|enable|disable');
     return true;
   }
@@ -186,8 +209,20 @@ async function handleSlash(line) {
         console.log(await readTextFile(cwd, rest));
         break;
       case '/search': {
-        const [query, maybePath] = rest.split(' | ');
-        console.log(await searchFiles(cwd, query || '', maybePath || '.'));
+        let query = rest;
+        let searchPath = '.';
+        if (rest.includes(' | ')) {
+          const split = rest.split(' | ');
+          query = split[0] || '';
+          searchPath = split[1] || '.';
+        } else {
+          const tokens = rest.split(/\s+/).filter(Boolean);
+          if (tokens.length > 1) {
+            query = tokens[0];
+            searchPath = tokens.slice(1).join(' ');
+          }
+        }
+        console.log(await searchFiles(cwd, query || '', searchPath || '.'));
         break;
       }
       case '/shell':
@@ -216,12 +251,28 @@ async function handleSlash(line) {
   }
 }
 
+async function processInput(rawLine) {
+  for (const item of splitPastedCommands(rawLine)) {
+    const line = normalizeBareCommand(item);
+    if (!line) continue;
+    if (line.startsWith('/')) await handleSlash(line);
+    else {
+      try {
+        await runAgent(line);
+      } catch (error) {
+        console.log(`\nagent error:\n${error?.message || String(error)}\n`);
+      }
+    }
+    if (shouldExit) break;
+  }
+}
+
 async function main() {
   banner();
   while (!shouldExit) {
     let line = '';
     try {
-      line = (await rl.question('clude> ')).trim();
+      line = await rl.question('clude> ');
     } catch (error) {
       if (error?.code === 'ABORT_ERR') {
         console.log('\nInterrupted. The agent is still running. Use /exit to close it cleanly.\n');
@@ -229,16 +280,8 @@ async function main() {
       }
       throw error;
     }
-    if (!line) continue;
-    if (line.startsWith('/')) {
-      await handleSlash(line);
-      continue;
-    }
-    try {
-      await runAgent(line);
-    } catch (error) {
-      console.log(`\nagent error:\n${error?.message || String(error)}\n`);
-    }
+    if (!line.trim()) continue;
+    await processInput(line);
   }
 }
 

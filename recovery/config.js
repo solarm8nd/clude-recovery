@@ -1,22 +1,27 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const ROOT = process.cwd();
-export const STATE_FILE = path.join(ROOT, '.clude-recovery.json');
+export function getRoot(root = process.cwd()) {
+  return root;
+}
 
-export function readState() {
+export function getStateFile(root = process.cwd()) {
+  return path.join(getRoot(root), '.clude-recovery.json');
+}
+
+export function readState(root = process.cwd()) {
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    return JSON.parse(fs.readFileSync(getStateFile(root), 'utf8'));
   } catch {
     return { bridgeEnabled: false };
   }
 }
 
-export function writeState(nextState) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
+export function writeState(nextState, root = process.cwd()) {
+  fs.writeFileSync(getStateFile(root), JSON.stringify(nextState, null, 2), 'utf8');
 }
 
-function readDotEnv(root = ROOT) {
+function readDotEnv(root = process.cwd()) {
   const envPath = path.join(root, '.env');
   try {
     const raw = fs.readFileSync(envPath, 'utf8');
@@ -28,9 +33,7 @@ function readDotEnv(root = ROOT) {
       if (eq === -1) continue;
       const key = trimmed.slice(0, eq).trim();
       let value = trimmed.slice(eq + 1).trim();
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
       out[key] = value;
     }
     return out;
@@ -39,8 +42,8 @@ function readDotEnv(root = ROOT) {
   }
 }
 
-export function getLocalModelConfig() {
-  const envFile = readDotEnv();
+export function getLocalModelConfig(root = process.cwd()) {
+  const envFile = readDotEnv(root);
   return {
     baseUrl: process.env.LOCAL_LLM_BASE_URL || envFile.LOCAL_LLM_BASE_URL || '',
     model: process.env.LOCAL_LLM_MODEL || envFile.LOCAL_LLM_MODEL || '',

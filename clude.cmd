@@ -1,3 +1,2 @@
 @echo off
-cd /d "%~dp0"
-node agent.js
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0clude.ps1" %*

@@ -1,7 +1,7 @@
 import { getLocalModelConfig } from './config.js';
 
-export function isLocalModelConfigured() {
-  const cfg = getLocalModelConfig();
+export function isLocalModelConfigured(root = process.cwd()) {
+  const cfg = getLocalModelConfig(root);
   return Boolean(cfg.baseUrl && cfg.model);
 }
 
@@ -9,8 +9,8 @@ function normalizeBaseUrl(baseUrl) {
   return baseUrl.replace(/\/$/, '');
 }
 
-export async function callLocalModel(messages, systemPrompt) {
-  const cfg = getLocalModelConfig();
+export async function callLocalModel(messages, systemPrompt, root = process.cwd()) {
+  const cfg = getLocalModelConfig(root);
   if (!cfg.baseUrl || !cfg.model) {
     throw new Error('LOCAL_LLM_BASE_URL or LOCAL_LLM_MODEL is not set.');
   }
@@ -33,9 +33,6 @@ export async function callLocalModel(messages, systemPrompt) {
   });
 
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(JSON.stringify(data));
-  }
-
+  if (!response.ok) throw new Error(JSON.stringify(data));
   return data?.choices?.[0]?.message?.content || '';
 }

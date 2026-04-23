@@ -1,466 +1,718 @@
-import axios, { type AxiosRequestConfig, type AxiosResponse } from 'axios'
-import { randomUUID } from 'crypto'
-import { getOauthConfig } from 'src/constants/oauth.js'
-import { getOrganizationUUID } from 'src/services/oauth/client.js'
-import z from 'zod/v4'
-import { getClaudeAIOAuthTokens } from '../auth.js'
-import { logForDebugging } from '../debug.js'
-import { parseGitHubRepository } from '../detectRepository.js'
-import { errorMessage, toError } from '../errors.js'
-import { lazySchema } from '../lazySchema.js'
-import { logError } from '../log.js'
-import { sleep } from '../sleep.js'
-import { jsonStringify } from '../slowOperations.js'
+import type Anthropic from '@anthropic-ai/sdk'
+import type {
+  BetaTool,
+  BetaToolUnion,
+} from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import { createHash } from 'crypto'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from 'src/constants/prompts.js'
+import { getSystemContext, getUserContext } from 'src/context.js'
+import { isAnalyticsDisabled } from 'src/services/analytics/config.js'
+import {
+  checkStatsigFeatureGate_CACHED_MAY_BE_STALE,
+  getFeatureValue_CACHED_MAY_BE_STALE,
+} from 'src/services/analytics/growthbook.js'
+import {
+  type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+  logEvent,
+} from 'src/services/analytics/index.js'
+import { prefetchAllMcpResources } from 'src/services/mcp/client.js'
+import type { ScopedMcpServerConfig } from 'src/services/mcp/types.js'
+import { BashTool } from 'src/tools/BashTool/BashTool.js'
+import { FileEditTool } from 'src/tools/FileEditTool/FileEditTool.js'
+import {
+  normalizeFileEditInput,
+  stripTrailingWhitespace,
+} from 'src/tools/FileEditTool/utils.js'
+import { FileWriteTool } from 'src/tools/FileWriteTool/FileWriteTool.js'
+import { getTools } from 'src/tools.js'
+import type { AgentId } from 'src/types/ids.js'
+import type { z } from 'zod/v4'
+import { CLI_SYSPROMPT_PREFIXES } from '../constants/system.js'
+import { roughTokenCountEstimation } from '../services/tokenEstimation.js'
+import type { Tool, ToolPermissionContext, Tools } from '../Tool.js'
+import { AGENT_TOOL_NAME } from '../tools/AgentTool/constants.js'
+import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
+import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../tools/ExitPlanModeTool/constants.js'
+import { TASK_OUTPUT_TOOL_NAME } from '../tools/TaskOutputTool/constants.js'
+import type { Message } from '../types/message.js'
+import { isAgentSwarmsEnabled } from './agentSwarmsEnabled.js'
+import {
+  modelSupportsStructuredOutputs,
+  shouldUseGlobalCacheScope,
+} from './betas.js'
+import { getCwd } from './cwd.js'
+import { logForDebugging } from './debug.js'
+import { isEnvTruthy } from './envUtils.js'
+import { createUserMessage } from './messages.js'
+import {
+  getAPIProvider,
+  isFirstPartyAnthropicBaseUrl,
+} from './model/providers.js'
+import {
+  getFileReadIgnorePatterns,
+  normalizePatternsToPath,
+} from './permissions/filesystem.js'
+import {
+  getPlan,
+  getPlanFilePath,
+  persistFileSnapshotIfRemote,
+} from './plans.js'
+import { getPlatform } from './platform.js'
+import { countFilesRoundedRg } from './ripgrep.js'
+import { jsonStringify } from './slowOperations.js'
+import type { SystemPrompt } from './systemPromptType.js'
+import { getToolSchemaCache } from './toolSchemaCache.js'
+import { windowsPathToPosixPath } from './windowsPaths.js'
+import { zodToJsonSchema } from './zodToJsonSchema.js'
 
-// Retry configuration for teleport API requests
-const TELEPORT_RETRY_DELAYS = [2000, 4000, 8000, 16000] // 4 retries with exponential backoff
-const MAX_TELEPORT_RETRIES = TELEPORT_RETRY_DELAYS.length
-
-export const CCR_BYOC_BETA = 'ccr-byoc-2025-07-29'
-
-/**
- * Checks if an axios error is a transient network error that should be retried
- */
-export function isTransientNetworkError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) {
-    return false
+// Extended BetaTool type with strict mode and defer_loading support
+type BetaToolWithExtras = BetaTool & {
+  strict?: boolean
+  defer_loading?: boolean
+  cache_control?: {
+    type: 'ephemeral'
+    scope?: 'global' | 'org'
+    ttl?: '5m' | '1h'
   }
+  eager_input_streaming?: boolean
+}
 
-  // Retry on network errors (no response received)
-  if (!error.response) {
-    return true
-  }
+export type CacheScope = 'global' | 'org'
+export type SystemPromptBlock = {
+  text: string
+  cacheScope: CacheScope | null
+}
 
-  // Retry on server errors (5xx)
-  if (error.response.status >= 500) {
-    return true
-  }
-
-  // Don't retry on client errors (4xx) - they're not transient
-  return false
+// Fields to filter from tool schemas when swarms are not enabled
+const SWARM_FIELDS_BY_TOOL: Record<string, string[]> = {
+  [EXIT_PLAN_MODE_V2_TOOL_NAME]: ['launchSwarm', 'teammateCount'],
+  [AGENT_TOOL_NAME]: ['name', 'team_name', 'mode'],
 }
 
 /**
- * Makes an axios GET request with automatic retry for transient network errors
- * Uses exponential backoff: 2s, 4s, 8s, 16s (4 retries = 5 total attempts)
+ * Filter swarm-related fields from a tool's input schema.
+ * Called at runtime when isAgentSwarmsEnabled() returns false.
  */
-export async function axiosGetWithRetry<T>(
-  url: string,
-  config?: AxiosRequestConfig,
-): Promise<AxiosResponse<T>> {
-  let lastError: unknown
+function filterSwarmFieldsFromSchema(
+  toolName: string,
+  schema: Anthropic.Tool.InputSchema,
+): Anthropic.Tool.InputSchema {
+  const fieldsToRemove = SWARM_FIELDS_BY_TOOL[toolName]
+  if (!fieldsToRemove || fieldsToRemove.length === 0) {
+    return schema
+  }
 
-  for (let attempt = 0; attempt <= MAX_TELEPORT_RETRIES; attempt++) {
-    try {
-      return await axios.get<T>(url, config)
-    } catch (error) {
-      lastError = error
+  // Clone the schema to avoid mutating the original
+  const filtered = { ...schema }
+  const props = filtered.properties
+  if (props && typeof props === 'object') {
+    const filteredProps = { ...(props as Record<string, unknown>) }
+    for (const field of fieldsToRemove) {
+      delete filteredProps[field]
+    }
+    filtered.properties = filteredProps
+  }
 
-      // Don't retry if this isn't a transient error
-      if (!isTransientNetworkError(error)) {
-        throw error
+  return filtered
+}
+
+export async function toolToAPISchema(
+  tool: Tool,
+  options: {
+    getToolPermissionContext: () => Promise<ToolPermissionContext>
+    tools: Tools
+    agents: AgentDefinition[]
+    allowedAgentTypes?: string[]
+    model?: string
+    /** When true, mark this tool with defer_loading for tool search */
+    deferLoading?: boolean
+    cacheControl?: {
+      type: 'ephemeral'
+      scope?: 'global' | 'org'
+      ttl?: '5m' | '1h'
+    }
+  },
+): Promise<BetaToolUnion> {
+  // Session-stable base schema: name, description, input_schema, strict,
+  // eager_input_streaming. These are computed once per session and cached to
+  // prevent mid-session GrowthBook flips (tengu_tool_pear, tengu_fgts) or
+  // tool.prompt() drift from churning the serialized tool array bytes.
+  // See toolSchemaCache.ts for rationale.
+  //
+  // Cache key includes inputJSONSchema when present. StructuredOutput instances
+  // share the name 'StructuredOutput' but carry different schemas per workflow
+  // call — name-only keying returned a stale schema (5.4% → 51% err rate, see
+  // PR#25424). MCP tools also set inputJSONSchema but each has a stable schema,
+  // so including it preserves their GB-flip cache stability.
+  const cacheKey =
+    'inputJSONSchema' in tool && tool.inputJSONSchema
+      ? `${tool.name}:${jsonStringify(tool.inputJSONSchema)}`
+      : tool.name
+  const cache = getToolSchemaCache()
+  let base = cache.get(cacheKey)
+  if (!base) {
+    const strictToolsEnabled =
+      checkStatsigFeatureGate_CACHED_MAY_BE_STALE('tengu_tool_pear')
+    // Use tool's JSON schema directly if provided, otherwise convert Zod schema
+    let input_schema = (
+      'inputJSONSchema' in tool && tool.inputJSONSchema
+        ? tool.inputJSONSchema
+        : zodToJsonSchema(tool.inputSchema)
+    ) as Anthropic.Tool.InputSchema
+
+    // Filter out swarm-related fields when swarms are not enabled
+    // This ensures external non-EAP users don't see swarm features in the schema
+    if (!isAgentSwarmsEnabled()) {
+      input_schema = filterSwarmFieldsFromSchema(tool.name, input_schema)
+    }
+
+    base = {
+      name: tool.name,
+      description: await tool.prompt({
+        getToolPermissionContext: options.getToolPermissionContext,
+        tools: options.tools,
+        agents: options.agents,
+        allowedAgentTypes: options.allowedAgentTypes,
+      }),
+      input_schema,
+    }
+
+    // Only add strict if:
+    // 1. Feature flag is enabled
+    // 2. Tool has strict: true
+    // 3. Model is provided and supports it (not all models support it right now)
+    //    (if model is not provided, assume we can't use strict tools)
+    if (
+      strictToolsEnabled &&
+      tool.strict === true &&
+      options.model &&
+      modelSupportsStructuredOutputs(options.model)
+    ) {
+      base.strict = true
+    }
+
+    // Enable fine-grained tool streaming via per-tool API field.
+    // Without FGTS, the API buffers entire tool input parameters before sending
+    // input_json_delta events, causing multi-minute hangs on large tool inputs.
+    // Gated to direct api.anthropic.com: proxies (LiteLLM etc.) and Bedrock/Vertex
+    // with Claude 4.5 reject this field with 400. See GH#32742, PR #21729.
+    if (
+      getAPIProvider() === 'firstParty' &&
+      isFirstPartyAnthropicBaseUrl() &&
+      (getFeatureValue_CACHED_MAY_BE_STALE('tengu_fgts', false) ||
+        isEnvTruthy(process.env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING))
+    ) {
+      base.eager_input_streaming = true
+    }
+
+    cache.set(cacheKey, base)
+  }
+
+  // Per-request overlay: defer_loading and cache_control vary by call
+  // (tool search defers different tools per turn; cache markers move).
+  // Explicit field copy avoids mutating the cached base and sidesteps
+  // BetaTool.cache_control's `| null` clashing with our narrower type.
+  const schema: BetaToolWithExtras = {
+    name: base.name,
+    description: base.description,
+    input_schema: base.input_schema,
+    ...(base.strict && { strict: true }),
+    ...(base.eager_input_streaming && { eager_input_streaming: true }),
+  }
+
+  // Add defer_loading if requested (for tool search feature)
+  if (options.deferLoading) {
+    schema.defer_loading = true
+  }
+
+  if (options.cacheControl) {
+    schema.cache_control = options.cacheControl
+  }
+
+  // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS is the kill switch for beta API
+  // shapes. Proxy gateways (ANTHROPIC_BASE_URL → LiteLLM → Bedrock) reject
+  // fields like defer_loading with "Extra inputs are not permitted". The gates
+  // above each field are scattered and not all provider-aware, so this strips
+  // everything not in the base-tool allowlist at the one choke point all tool
+  // schemas pass through — including fields added in the future.
+  // cache_control is allowlisted: the base {type: 'ephemeral'} shape is
+  // standard prompt caching (Bedrock/Vertex supported); the beta sub-fields
+  // (scope, ttl) are already gated upstream by shouldIncludeFirstPartyOnlyBetas
+  // which independently respects this kill switch.
+  // github.com/anthropics/claude-code/issues/20031
+  if (isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS)) {
+    const allowed = new Set([
+      'name',
+      'description',
+      'input_schema',
+      'cache_control',
+    ])
+    const stripped = Object.keys(schema).filter(k => !allowed.has(k))
+    if (stripped.length > 0) {
+      logStripOnce(stripped)
+      return {
+        name: schema.name,
+        description: schema.description,
+        input_schema: schema.input_schema,
+        ...(schema.cache_control && { cache_control: schema.cache_control }),
       }
-
-      // Don't retry if we've exhausted all retries
-      if (attempt >= MAX_TELEPORT_RETRIES) {
-        logForDebugging(
-          `Teleport request failed after ${attempt + 1} attempts: ${errorMessage(error)}`,
-        )
-        throw error
-      }
-
-      const delay = TELEPORT_RETRY_DELAYS[attempt] ?? 2000
-      logForDebugging(
-        `Teleport request failed (attempt ${attempt + 1}/${MAX_TELEPORT_RETRIES + 1}), retrying in ${delay}ms: ${errorMessage(error)}`,
-      )
-      await sleep(delay)
     }
   }
 
-  throw lastError
+  // Note: We cast to BetaTool but the extra fields are still present at runtime
+  // and will be serialized in the API request, even though they're not in the SDK's
+  // BetaTool type definition. This is intentional for beta features.
+  return schema as BetaTool
 }
 
-// Types matching the actual Sessions API response from api/schemas/sessions/sessions.py
-export type SessionStatus = 'requires_action' | 'running' | 'idle' | 'archived'
-
-export type GitSource = {
-  type: 'git_repository'
-  url: string
-  revision?: string | null
-  allow_unrestricted_git_push?: boolean
-}
-
-export type KnowledgeBaseSource = {
-  type: 'knowledge_base'
-  knowledge_base_id: string
-}
-
-export type SessionContextSource = GitSource | KnowledgeBaseSource
-
-// Outcome types from api/schemas/sandbox.py
-export type OutcomeGitInfo = {
-  type: 'github'
-  repo: string
-  branches: string[]
-}
-
-export type GitRepositoryOutcome = {
-  type: 'git_repository'
-  git_info: OutcomeGitInfo
-}
-
-export type Outcome = GitRepositoryOutcome
-
-export type SessionContext = {
-  sources: SessionContextSource[]
-  cwd: string
-  outcomes: Outcome[] | null
-  custom_system_prompt: string | null
-  append_system_prompt: string | null
-  model: string | null
-  // Seed filesystem with a git bundle on Files API
-  seed_bundle_file_id?: string
-  github_pr?: { owner: string; repo: string; number: number }
-  reuse_outcome_branches?: boolean
-}
-
-export type SessionResource = {
-  type: 'session'
-  id: string
-  title: string | null
-  session_status: SessionStatus
-  environment_id: string
-  created_at: string
-  updated_at: string
-  session_context: SessionContext
-}
-
-export type ListSessionsResponse = {
-  data: SessionResource[]
-  has_more: boolean
-  first_id: string | null
-  last_id: string | null
-}
-
-export const CodeSessionSchema = lazySchema(() =>
-  z.object({
-    id: z.string(),
-    title: z.string(),
-    description: z.string(),
-    status: z.enum([
-      'idle',
-      'working',
-      'waiting',
-      'completed',
-      'archived',
-      'cancelled',
-      'rejected',
-    ]),
-    repo: z
-      .object({
-        name: z.string(),
-        owner: z.object({
-          login: z.string(),
-        }),
-        default_branch: z.string().optional(),
-      })
-      .nullable(),
-    turns: z.array(z.string()),
-    created_at: z.string(),
-    updated_at: z.string(),
-  }),
-)
-
-// Export the inferred type from the Zod schema
-export type CodeSession = z.infer<ReturnType<typeof CodeSessionSchema>>
-
-/**
- * Validates and prepares for API requests
- * @returns Object containing access token and organization UUID
- */
-export async function prepareApiRequest(): Promise<{
-  accessToken: string
-  orgUUID: string
-}> {
-  const accessToken = getClaudeAIOAuthTokens()?.accessToken
-  if (accessToken === undefined) {
-    throw new Error(
-      'Claude Code web sessions require authentication with a Claude.ai account. API key authentication is not sufficient. Please run /login to authenticate, or check your authentication status with /status.',
-    )
-  }
-
-  const orgUUID = await getOrganizationUUID()
-  if (!orgUUID) {
-    throw new Error('Unable to get organization UUID')
-  }
-
-  return { accessToken, orgUUID }
+let loggedStrip = false
+function logStripOnce(stripped: string[]): void {
+  if (loggedStrip) return
+  loggedStrip = true
+  logForDebugging(
+    `[betas] Stripped from tool schemas: [${stripped.join(', ')}] (CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1)`,
+  )
 }
 
 /**
- * Fetches code sessions from the new Sessions API (/v1/sessions)
- * @returns Array of code sessions
+ * Log stats about first block for analyzing prefix matching config
+ * (see https://console.statsig.com/4aF3Ewatb6xPVpCwxb5nA3/dynamic_configs/claude_cli_system_prompt_prefixes)
  */
-export async function fetchCodeSessionsFromSessionsAPI(): Promise<
-  CodeSession[]
-> {
-  const { accessToken, orgUUID } = await prepareApiRequest()
+export function logAPIPrefix(systemPrompt: SystemPrompt): void {
+  const [firstSyspromptBlock] = splitSysPromptPrefix(systemPrompt)
+  const firstSystemPrompt = firstSyspromptBlock?.text
+  logEvent('tengu_sysprompt_block', {
+    snippet: firstSystemPrompt?.slice(
+      0,
+      20,
+    ) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    length: firstSystemPrompt?.length ?? 0,
+    hash: (firstSystemPrompt
+      ? createHash('sha256').update(firstSystemPrompt).digest('hex')
+      : '') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+  })
+}
 
-  const url = `${getOauthConfig().BASE_API_URL}/v1/sessions`
-
-  try {
-    const headers = {
-      ...getOAuthHeaders(accessToken),
-      'anthropic-beta': 'ccr-byoc-2025-07-29',
-      'x-organization-uuid': orgUUID,
-    }
-
-    const response = await axiosGetWithRetry<ListSessionsResponse>(url, {
-      headers,
+/**
+ * Split system prompt blocks by content type for API matching and cache control.
+ * See https://console.statsig.com/4aF3Ewatb6xPVpCwxb5nA3/dynamic_configs/claude_cli_system_prompt_prefixes
+ *
+ * Behavior depends on feature flags and options:
+ *
+ * 1. MCP tools present (skipGlobalCacheForSystemPrompt=true):
+ *    Returns up to 3 blocks with org-level caching (no global cache on system prompt):
+ *    - Attribution header (cacheScope=null)
+ *    - System prompt prefix (cacheScope='org')
+ *    - Everything else concatenated (cacheScope='org')
+ *
+ * 2. Global cache mode with boundary marker (1P only, boundary found):
+ *    Returns up to 4 blocks:
+ *    - Attribution header (cacheScope=null)
+ *    - System prompt prefix (cacheScope=null)
+ *    - Static content before boundary (cacheScope='global')
+ *    - Dynamic content after boundary (cacheScope=null)
+ *
+ * 3. Default mode (3P providers, or boundary missing):
+ *    Returns up to 3 blocks with org-level caching:
+ *    - Attribution header (cacheScope=null)
+ *    - System prompt prefix (cacheScope='org')
+ *    - Everything else concatenated (cacheScope='org')
+ */
+export function splitSysPromptPrefix(
+  systemPrompt: SystemPrompt,
+  options?: { skipGlobalCacheForSystemPrompt?: boolean },
+): SystemPromptBlock[] {
+  const useGlobalCacheFeature = shouldUseGlobalCacheScope()
+  if (useGlobalCacheFeature && options?.skipGlobalCacheForSystemPrompt) {
+    logEvent('tengu_sysprompt_using_tool_based_cache', {
+      promptBlockCount: systemPrompt.length,
     })
 
-    if (response.status !== 200) {
-      throw new Error(`Failed to fetch code sessions: ${response.statusText}`)
+    // Filter out boundary marker, return blocks without global scope
+    let attributionHeader: string | undefined
+    let systemPromptPrefix: string | undefined
+    const rest: string[] = []
+
+    for (const prompt of systemPrompt) {
+      if (!prompt) continue
+      if (prompt === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue // Skip boundary
+      if (prompt.startsWith('x-anthropic-billing-header')) {
+        attributionHeader = prompt
+      } else if (CLI_SYSPROMPT_PREFIXES.has(prompt)) {
+        systemPromptPrefix = prompt
+      } else {
+        rest.push(prompt)
+      }
     }
 
-    // Transform SessionResource[] to CodeSession[] format
-    const sessions: CodeSession[] = response.data.data.map(session => {
-      // Extract repository info from git sources
-      const gitSource = session.session_context.sources.find(
-        (source): source is GitSource => source.type === 'git_repository',
-      )
+    const result: SystemPromptBlock[] = []
+    if (attributionHeader) {
+      result.push({ text: attributionHeader, cacheScope: null })
+    }
+    if (systemPromptPrefix) {
+      result.push({ text: systemPromptPrefix, cacheScope: 'org' })
+    }
+    const restJoined = rest.join('\n\n')
+    if (restJoined) {
+      result.push({ text: restJoined, cacheScope: 'org' })
+    }
+    return result
+  }
 
-      let repo: CodeSession['repo'] = null
-      if (gitSource?.url) {
-        // Parse GitHub URL using the existing utility function
-        const repoPath = parseGitHubRepository(gitSource.url)
-        if (repoPath) {
-          const [owner, name] = repoPath.split('/')
-          if (owner && name) {
-            repo = {
-              name,
-              owner: {
-                login: owner,
-              },
-              default_branch: gitSource.revision || undefined,
-            }
-          }
+  if (useGlobalCacheFeature) {
+    const boundaryIndex = systemPrompt.findIndex(
+      s => s === SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    )
+    if (boundaryIndex !== -1) {
+      let attributionHeader: string | undefined
+      let systemPromptPrefix: string | undefined
+      const staticBlocks: string[] = []
+      const dynamicBlocks: string[] = []
+
+      for (let i = 0; i < systemPrompt.length; i++) {
+        const block = systemPrompt[i]
+        if (!block || block === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue
+
+        if (block.startsWith('x-anthropic-billing-header')) {
+          attributionHeader = block
+        } else if (CLI_SYSPROMPT_PREFIXES.has(block)) {
+          systemPromptPrefix = block
+        } else if (i < boundaryIndex) {
+          staticBlocks.push(block)
+        } else {
+          dynamicBlocks.push(block)
         }
       }
 
-      return {
-        id: session.id,
-        title: session.title || 'Untitled',
-        description: '', // SessionResource doesn't have description field
-        status: session.session_status as CodeSession['status'], // Map session_status to status
-        repo,
-        turns: [], // SessionResource doesn't have turns field
-        created_at: session.created_at,
-        updated_at: session.updated_at,
-      }
-    })
+      const result: SystemPromptBlock[] = []
+      if (attributionHeader)
+        result.push({ text: attributionHeader, cacheScope: null })
+      if (systemPromptPrefix)
+        result.push({ text: systemPromptPrefix, cacheScope: null })
+      const staticJoined = staticBlocks.join('\n\n')
+      if (staticJoined)
+        result.push({ text: staticJoined, cacheScope: 'global' })
+      const dynamicJoined = dynamicBlocks.join('\n\n')
+      if (dynamicJoined) result.push({ text: dynamicJoined, cacheScope: null })
 
-    return sessions
-  } catch (error) {
-    const err = toError(error)
-    logError(err)
-    throw error
-  }
-}
+      logEvent('tengu_sysprompt_boundary_found', {
+        blockCount: result.length,
+        staticBlockLength: staticJoined.length,
+        dynamicBlockLength: dynamicJoined.length,
+      })
 
-/**
- * Creates OAuth headers for API requests
- * @param accessToken The OAuth access token
- * @returns Headers object with Authorization, Content-Type, and anthropic-version
- */
-export function getOAuthHeaders(accessToken: string): Record<string, string> {
-  return {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json',
-    'anthropic-version': '2023-06-01',
-  }
-}
-
-/**
- * Fetches a single session by ID from the Sessions API
- * @param sessionId The session ID to fetch
- * @returns The session resource
- */
-export async function fetchSession(
-  sessionId: string,
-): Promise<SessionResource> {
-  const { accessToken, orgUUID } = await prepareApiRequest()
-
-  const url = `${getOauthConfig().BASE_API_URL}/v1/sessions/${sessionId}`
-  const headers = {
-    ...getOAuthHeaders(accessToken),
-    'anthropic-beta': 'ccr-byoc-2025-07-29',
-    'x-organization-uuid': orgUUID,
-  }
-
-  const response = await axios.get<SessionResource>(url, {
-    headers,
-    timeout: 15000,
-    validateStatus: status => status < 500,
-  })
-
-  if (response.status !== 200) {
-    // Extract error message from response if available
-    const errorData = response.data as { error?: { message?: string } }
-    const apiMessage = errorData?.error?.message
-
-    if (response.status === 404) {
-      throw new Error(`Session not found: ${sessionId}`)
+      return result
+    } else {
+      logEvent('tengu_sysprompt_missing_boundary_marker', {
+        promptBlockCount: systemPrompt.length,
+      })
     }
+  }
+  let attributionHeader: string | undefined
+  let systemPromptPrefix: string | undefined
+  const rest: string[] = []
 
-    if (response.status === 401) {
-      throw new Error('Session expired. Please run /login to sign in again.')
+  for (const block of systemPrompt) {
+    if (!block) continue
+
+    if (block.startsWith('x-anthropic-billing-header')) {
+      attributionHeader = block
+    } else if (CLI_SYSPROMPT_PREFIXES.has(block)) {
+      systemPromptPrefix = block
+    } else {
+      rest.push(block)
     }
-
-    throw new Error(
-      apiMessage ||
-        `Failed to fetch session: ${response.status} ${response.statusText}`,
-    )
   }
 
-  return response.data
+  const result: SystemPromptBlock[] = []
+  if (attributionHeader)
+    result.push({ text: attributionHeader, cacheScope: null })
+  if (systemPromptPrefix)
+    result.push({ text: systemPromptPrefix, cacheScope: 'org' })
+  const restJoined = rest.join('\n\n')
+  if (restJoined) result.push({ text: restJoined, cacheScope: 'org' })
+  return result
+}
+
+export function appendSystemContext(
+  systemPrompt: SystemPrompt,
+  context: { [k: string]: string },
+): string[] {
+  return [
+    ...systemPrompt,
+    Object.entries(context)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join('\n'),
+  ].filter(Boolean)
+}
+
+export function prependUserContext(
+  messages: Message[],
+  context: { [k: string]: string },
+): Message[] {
+  if (process.env.NODE_ENV === 'test') {
+    return messages
+  }
+
+  if (Object.entries(context).length === 0) {
+    return messages
+  }
+
+  return [
+    createUserMessage({
+      content: `<system-reminder>\nAs you answer the user's questions, you can use the following context:\n${Object.entries(
+        context,
+      )
+        .map(([key, value]) => `# ${key}\n${value}`)
+        .join('\n')}
+
+      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n`,
+      isMeta: true,
+    }),
+    ...messages,
+  ]
 }
 
 /**
- * Extracts the first branch name from a session's git repository outcomes
- * @param session The session resource to extract from
- * @returns The first branch name, or undefined if none found
+ * Log metrics about context and system prompt size
  */
-export function getBranchFromSession(
-  session: SessionResource,
-): string | undefined {
-  const gitOutcome = session.session_context.outcomes?.find(
-    (outcome): outcome is GitRepositoryOutcome =>
-      outcome.type === 'git_repository',
+export async function logContextMetrics(
+  mcpConfigs: Record<string, ScopedMcpServerConfig>,
+  toolPermissionContext: ToolPermissionContext,
+): Promise<void> {
+  // Early return if logging is disabled
+  if (isAnalyticsDisabled()) {
+    return
+  }
+  const [{ tools: mcpTools }, tools, userContext, systemContext] =
+    await Promise.all([
+      prefetchAllMcpResources(mcpConfigs),
+      getTools(toolPermissionContext),
+      getUserContext(),
+      getSystemContext(),
+    ])
+  // Extract individual context sizes and calculate total
+  const gitStatusSize = systemContext.gitStatus?.length ?? 0
+  const claudeMdSize = userContext.claudeMd?.length ?? 0
+
+  // Calculate total context size
+  const totalContextSize = gitStatusSize + claudeMdSize
+
+  // Get file count using ripgrep (rounded to nearest power of 10 for privacy)
+  const currentDir = getCwd()
+  const ignorePatternsByRoot = getFileReadIgnorePatterns(toolPermissionContext)
+  const normalizedIgnorePatterns = normalizePatternsToPath(
+    ignorePatternsByRoot,
+    currentDir,
   )
-  return gitOutcome?.git_info?.branches[0]
+  const fileCount = await countFilesRoundedRg(
+    currentDir,
+    AbortSignal.timeout(1000),
+    normalizedIgnorePatterns,
+  )
+
+  // Calculate tool metrics
+  let mcpToolsCount = 0
+  let mcpServersCount = 0
+  let mcpToolsTokens = 0
+  let nonMcpToolsCount = 0
+  let nonMcpToolsTokens = 0
+
+  const nonMcpTools = tools.filter(tool => !tool.isMcp)
+  mcpToolsCount = mcpTools.length
+  nonMcpToolsCount = nonMcpTools.length
+
+  // Extract unique server names from MCP tool names (format: mcp__servername__toolname)
+  const serverNames = new Set<string>()
+  for (const tool of mcpTools) {
+    const parts = tool.name.split('__')
+    if (parts.length >= 3 && parts[1]) {
+      serverNames.add(parts[1])
+    }
+  }
+  mcpServersCount = serverNames.size
+
+  // Estimate tool tokens locally for analytics (avoids N API calls per session)
+  // Use inputJSONSchema (plain JSON Schema) when available, otherwise convert Zod schema
+  for (const tool of mcpTools) {
+    const schema =
+      'inputJSONSchema' in tool && tool.inputJSONSchema
+        ? tool.inputJSONSchema
+        : zodToJsonSchema(tool.inputSchema)
+    mcpToolsTokens += roughTokenCountEstimation(jsonStringify(schema))
+  }
+  for (const tool of nonMcpTools) {
+    const schema =
+      'inputJSONSchema' in tool && tool.inputJSONSchema
+        ? tool.inputJSONSchema
+        : zodToJsonSchema(tool.inputSchema)
+    nonMcpToolsTokens += roughTokenCountEstimation(jsonStringify(schema))
+  }
+
+  logEvent('tengu_context_size', {
+    git_status_size: gitStatusSize,
+    claude_md_size: claudeMdSize,
+    total_context_size: totalContextSize,
+    project_file_count_rounded: fileCount,
+    mcp_tools_count: mcpToolsCount,
+    mcp_servers_count: mcpServersCount,
+    mcp_tools_tokens: mcpToolsTokens,
+    non_mcp_tools_count: nonMcpToolsCount,
+    non_mcp_tools_tokens: nonMcpToolsTokens,
+  })
 }
 
-/**
- * Content for a remote session message.
- * Accepts a plain string or an array of content blocks (text, image, etc.)
- * following the Anthropic API messages spec.
- */
-export type RemoteMessageContent =
-  | string
-  | Array<{ type: string; [key: string]: unknown }>
-
-/**
- * Sends a user message event to an existing remote session via the Sessions API
- * @param sessionId The session ID to send the event to
- * @param messageContent The user message content (string or content blocks)
- * @param opts.uuid Optional UUID for the event — callers that added a local
- *   UserMessage first should pass its UUID so echo filtering can dedup
- * @returns Promise<boolean> True if successful, false otherwise
- */
-export async function sendEventToRemoteSession(
-  sessionId: string,
-  messageContent: RemoteMessageContent,
-  opts?: { uuid?: string },
-): Promise<boolean> {
-  try {
-    const { accessToken, orgUUID } = await prepareApiRequest()
-
-    const url = `${getOauthConfig().BASE_API_URL}/v1/sessions/${sessionId}/events`
-    const headers = {
-      ...getOAuthHeaders(accessToken),
-      'anthropic-beta': 'ccr-byoc-2025-07-29',
-      'x-organization-uuid': orgUUID,
+// TODO: Generalize this to all tools
+export function normalizeToolInput<T extends Tool>(
+  tool: T,
+  input: z.infer<T['inputSchema']>,
+  agentId?: AgentId,
+): z.infer<T['inputSchema']> {
+  switch (tool.name) {
+    case EXIT_PLAN_MODE_V2_TOOL_NAME: {
+      // Always inject plan content and file path for ExitPlanModeV2 so hooks/SDK get the plan.
+      // The V2 tool reads plan from file instead of input, but hooks/SDK
+      const plan = getPlan(agentId)
+      const planFilePath = getPlanFilePath(agentId)
+      // Persist file snapshot for CCR sessions so the plan survives pod recycling
+      void persistFileSnapshotIfRemote()
+      return plan !== null ? { ...input, plan, planFilePath } : input
     }
+    case BashTool.name: {
+      // Validated upstream, won't throw
+      const parsed = BashTool.inputSchema.parse(input)
+      const { command, timeout, description } = parsed
+      const cwd = getCwd()
+      let normalizedCommand = command.replace(`cd ${cwd} && `, '')
+      if (getPlatform() === 'windows') {
+        normalizedCommand = normalizedCommand.replace(
+          `cd ${windowsPathToPosixPath(cwd)} && `,
+          '',
+        )
+      }
 
-    const userEvent = {
-      uuid: opts?.uuid ?? randomUUID(),
-      session_id: sessionId,
-      type: 'user',
-      parent_tool_use_id: null,
-      message: {
-        role: 'user',
-        content: messageContent,
-      },
+      // Replace \\; with \; (commonly needed for find -exec commands)
+      normalizedCommand = normalizedCommand.replace(/\\\\;/g, '\\;')
+
+      // Logging for commands that are only echoing a string. This is to help us understand how often  Claude talks via bash
+      if (/^echo\s+["']?[^|&;><]*["']?$/i.test(normalizedCommand.trim())) {
+        logEvent('tengu_bash_tool_simple_echo', {})
+      }
+
+      // Check for run_in_background (may not exist in schema if CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is set)
+      const run_in_background =
+        'run_in_background' in parsed ? parsed.run_in_background : undefined
+
+      // SAFETY: Cast is safe because input was validated by .parse() above.
+      // TypeScript can't narrow the generic T based on switch(tool.name), so it
+      // doesn't know the return type matches T['inputSchema']. This is a fundamental
+      // TS limitation with generics, not bypassable without major refactoring.
+      return {
+        command: normalizedCommand,
+        description,
+        ...(timeout !== undefined && { timeout }),
+        ...(description !== undefined && { description }),
+        ...(run_in_background !== undefined && { run_in_background }),
+        ...('dangerouslyDisableSandbox' in parsed &&
+          parsed.dangerouslyDisableSandbox !== undefined && {
+            dangerouslyDisableSandbox: parsed.dangerouslyDisableSandbox,
+          }),
+      } as z.infer<T['inputSchema']>
     }
+    case FileEditTool.name: {
+      // Validated upstream, won't throw
+      const parsedInput = FileEditTool.inputSchema.parse(input)
 
-    const requestBody = {
-      events: [userEvent],
+      // This is a workaround for tokens claude can't see
+      const { file_path, edits } = normalizeFileEditInput({
+        file_path: parsedInput.file_path,
+        edits: [
+          {
+            old_string: parsedInput.old_string,
+            new_string: parsedInput.new_string,
+            replace_all: parsedInput.replace_all,
+          },
+        ],
+      })
+
+      // SAFETY: See comment in BashTool case above
+      return {
+        replace_all: edits[0]!.replace_all,
+        file_path,
+        old_string: edits[0]!.old_string,
+        new_string: edits[0]!.new_string,
+      } as z.infer<T['inputSchema']>
     }
+    case FileWriteTool.name: {
+      // Validated upstream, won't throw
+      const parsedInput = FileWriteTool.inputSchema.parse(input)
 
-    logForDebugging(
-      `[sendEventToRemoteSession] Sending event to session ${sessionId}`,
-    )
-    // The endpoint may block until the CCR worker is ready. Observed ~2.6s
-    // in normal cases; allow a generous margin for cold-start containers.
-    const response = await axios.post(url, requestBody, {
-      headers,
-      validateStatus: status => status < 500,
-      timeout: 30000,
-    })
+      // Markdown uses two trailing spaces as a hard line break — don't strip.
+      const isMarkdown = /\.(md|mdx)$/i.test(parsedInput.file_path)
 
-    if (response.status === 200 || response.status === 201) {
-      logForDebugging(
-        `[sendEventToRemoteSession] Successfully sent event to session ${sessionId}`,
-      )
-      return true
+      // SAFETY: See comment in BashTool case above
+      return {
+        file_path: parsedInput.file_path,
+        content: isMarkdown
+          ? parsedInput.content
+          : stripTrailingWhitespace(parsedInput.content),
+      } as z.infer<T['inputSchema']>
     }
-
-    logForDebugging(
-      `[sendEventToRemoteSession] Failed with status ${response.status}: ${jsonStringify(response.data)}`,
-    )
-    return false
-  } catch (error) {
-    logForDebugging(`[sendEventToRemoteSession] Error: ${errorMessage(error)}`)
-    return false
+    case TASK_OUTPUT_TOOL_NAME: {
+      // Normalize legacy parameter names from AgentOutputTool/BashOutputTool
+      const legacyInput = input as Record<string, unknown>
+      const taskId =
+        legacyInput.task_id ?? legacyInput.agentId ?? legacyInput.bash_id
+      const timeout =
+        legacyInput.timeout ??
+        (typeof legacyInput.wait_up_to === 'number'
+          ? legacyInput.wait_up_to * 1000
+          : undefined)
+      // SAFETY: See comment in BashTool case above
+      return {
+        task_id: taskId ?? '',
+        block: legacyInput.block ?? true,
+        timeout: timeout ?? 30000,
+      } as z.infer<T['inputSchema']>
+    }
+    default:
+      return input
   }
 }
 
-/**
- * Updates the title of an existing remote session via the Sessions API
- * @param sessionId The session ID to update
- * @param title The new title for the session
- * @returns Promise<boolean> True if successful, false otherwise
- */
-export async function updateSessionTitle(
-  sessionId: string,
-  title: string,
-): Promise<boolean> {
-  try {
-    const { accessToken, orgUUID } = await prepareApiRequest()
-
-    const url = `${getOauthConfig().BASE_API_URL}/v1/sessions/${sessionId}`
-    const headers = {
-      ...getOAuthHeaders(accessToken),
-      'anthropic-beta': 'ccr-byoc-2025-07-29',
-      'x-organization-uuid': orgUUID,
+// Strips fields that were added by normalizeToolInput before sending to API
+// (e.g., plan field from ExitPlanModeV2 which has an empty input schema)
+export function normalizeToolInputForAPI<T extends Tool>(
+  tool: T,
+  input: z.infer<T['inputSchema']>,
+): z.infer<T['inputSchema']> {
+  switch (tool.name) {
+    case EXIT_PLAN_MODE_V2_TOOL_NAME: {
+      // Strip injected fields before sending to API (schema expects empty object)
+      if (
+        input &&
+        typeof input === 'object' &&
+        ('plan' in input || 'planFilePath' in input)
+      ) {
+        const { plan, planFilePath, ...rest } = input as Record<string, unknown>
+        return rest as z.infer<T['inputSchema']>
+      }
+      return input
     }
-
-    logForDebugging(
-      `[updateSessionTitle] Updating title for session ${sessionId}: "${title}"`,
-    )
-    const response = await axios.patch(
-      url,
-      { title },
-      {
-        headers,
-        validateStatus: status => status < 500,
-      },
-    )
-
-    if (response.status === 200) {
-      logForDebugging(
-        `[updateSessionTitle] Successfully updated title for session ${sessionId}`,
-      )
-      return true
+    case FileEditTool.name: {
+      // Strip synthetic old_string/new_string/replace_all from OLD sessions
+      // that were resumed from transcripts written before PR #20357, where
+      // normalizeToolInput used to synthesize these. Needed so old --resume'd
+      // transcripts don't send whole-file copies to the API. New sessions
+      // don't need this (synthesis moved to emission time).
+      if (input && typeof input === 'object' && 'edits' in input) {
+        const { old_string, new_string, replace_all, ...rest } =
+          input as Record<string, unknown>
+        return rest as z.infer<T['inputSchema']>
+      }
+      return input
     }
-
-    logForDebugging(
-      `[updateSessionTitle] Failed with status ${response.status}: ${jsonStringify(response.data)}`,
-    )
-    return false
-  } catch (error) {
-    logForDebugging(`[updateSessionTitle] Error: ${errorMessage(error)}`)
-    return false
+    default:
+      return input
   }
 }
