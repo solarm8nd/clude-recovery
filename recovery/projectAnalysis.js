@@ -3,7 +3,8 @@ import path from 'node:path';
 
 const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.cache',
-  'tmp', 'temp', '__pycache__', '.venv', 'venv', 'target', 'out', '.idea', '.vscode'
+  'tmp', 'temp', '__pycache__', '.venv', '.venv_win', 'venv', 'env', '.tox',
+  'target', 'out', '.idea', '.vscode', 'site-packages'
 ]);
 
 const IMPORT_CODE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
@@ -152,7 +153,7 @@ function detectEcosystems(relPath, text, packageJson) {
   }
 
   if (/spring-boot|org\.springframework|springframework/i.test(text)) hits.add('spring');
-  if (/electron/i.test(text)) hits.add('electron');
+  if (/electron/i.test(text) && lower.includes('package.json')) hits.add('electron');
   if (/next\/?dist|next\.config/i.test(text)) hits.add('nextjs');
   if (/vite/i.test(text) && lower.includes('package.json')) hits.add('vite');
   if (/react/i.test(text) && lower.includes('package.json')) hits.add('react');
