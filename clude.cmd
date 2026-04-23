@@ -1,2 +1,3 @@
 @echo off
-node "%~dp0start.js" %*
+cd /d "%~dp0"
+node agent.js

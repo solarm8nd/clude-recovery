@@ -1,0 +1,476 @@
+{
+  "rootDir": "/mnt/data/clude_recovered_agent",
+  "totals": {
+    "files": 1994,
+    "directories": 328,
+    "codeFiles": 1957,
+    "todoCount": 130,
+    "brokenRelativeImportFiles": 1671
+  },
+  "package": {
+    "name": "clude-recovered-agent",
+    "version": "0.2.0",
+    "scripts": {
+      "start": "node agent.js",
+      "agent": "node agent.js",
+      "doctor": "node scripts/doctor.js",
+      "analyze": "node scripts/analyze.js"
+    },
+    "dependencies": 0,
+    "devDependencies": 0
+  },
+  "topExtensions": [
+    [
+      ".ts",
+      1375
+    ],
+    [
+      ".tsx",
+      552
+    ],
+    [
+      ".md",
+      30
+    ],
+    [
+      ".js",
+      30
+    ],
+    [
+      ".json",
+      4
+    ],
+    [
+      ".example",
+      1
+    ],
+    [
+      ".cmd",
+      1
+    ],
+    [
+      ".ps1",
+      1
+    ]
+  ],
+  "topDirectories": [
+    [
+      "src",
+      1974
+    ],
+    [
+      "recovery",
+      9
+    ],
+    [
+      "scripts",
+      2
+    ],
+    [
+      ".clude-recovery.json",
+      1
+    ],
+    [
+      ".env.example",
+      1
+    ],
+    [
+      "README-RUN-FIRST.md",
+      1
+    ],
+    [
+      "agent.js",
+      1
+    ],
+    [
+      "clude.cmd",
+      1
+    ],
+    [
+      "package.json",
+      1
+    ],
+    [
+      "recovery-summary.json",
+      1
+    ],
+    [
+      "start-clude.ps1",
+      1
+    ],
+    [
+      "tsconfig.json",
+      1
+    ]
+  ],
+  "entrypoints": [
+    "agent.js",
+    "package.json",
+    "src/QueryEngine.ts",
+    "src/commands/add-dir/index.ts",
+    "src/commands/agents/index.ts",
+    "src/commands/ant-trace/index.js",
+    "src/commands/autofix-pr/index.js",
+    "src/commands/backfill-sessions/index.js",
+    "src/commands/branch/index.ts",
+    "src/commands/break-cache/index.js",
+    "src/commands/bridge/index.ts",
+    "src/commands/btw/index.ts",
+    "src/commands/bughunter/index.js",
+    "src/commands/chrome/index.ts",
+    "src/commands/clear/index.ts",
+    "src/commands/color/index.ts",
+    "src/commands/compact/index.ts",
+    "src/commands/config/index.ts",
+    "src/commands/context/index.ts",
+    "src/commands/copy/index.ts",
+    "src/commands/cost/index.ts",
+    "src/commands/ctx_viz/index.js",
+    "src/commands/debug-tool-call/index.js",
+    "src/commands/desktop/index.ts",
+    "src/commands/diff/index.ts",
+    "src/commands/doctor/index.ts",
+    "src/commands/effort/index.ts",
+    "src/commands/env/index.js",
+    "src/commands/exit/index.ts",
+    "src/commands/export/index.ts",
+    "src/commands/extra-usage/index.ts",
+    "src/commands/fast/index.ts",
+    "src/commands/feedback/index.ts",
+    "src/commands/files/index.ts",
+    "src/commands/good-claude/index.js",
+    "src/commands/heapdump/index.ts",
+    "src/commands/help/index.ts",
+    "src/commands/hooks/index.ts",
+    "src/commands/ide/index.ts",
+    "src/commands/install-github-app/index.ts"
+  ],
+  "todoSamples": [
+    "recovery/projectAnalysis.js:127: if (/\\b(TODO|FIXME|XXX|HACK)\\b/i.test(lines[i])) {",
+    "src/QueryEngine.ts:545: .mode as PermissionMode, // TODO: avoid the cast",
+    "src/Tool.ts:398: // Optional because TungstenTool doesn't define this. TODO: Make it required.",
+    "src/Tool.ts:564: * updates the todo panel, not the transcript).",
+    "src/cli/print.ts:1144: // TODO: Clean up this code to avoid passing around a mutable array.",
+    "src/cli/print.ts:1876: // TODO(custom-tool-refactor): Should move to the init message, like browser",
+    "src/cli/print.ts:2919: const m = message.request // for typescript (TODO: use readonly types to avoid this)",
+    "src/commands/mcp/addCommand.ts:44: '  claude mcp add -e API_KEY=xxx my-server -- npx my-mcp-server\\n\\n' +",
+    "src/commands/mcp/mcp.tsx:10: // TODO: This is a hack to get the context value from toggleMcpServer (useContext only works in a component)",
+    "src/commands/mcp/xaaIdpCommand.ts:162: // TODO(paulc): read the JWT from stdin instead of argv to keep it out of",
+    "src/commands/plugin/BrowseMarketplace.tsx:682: // TODO: Actually scan local plugin directories to show real components",
+    "src/commands/review/reviewRemote.ts:7: * TODO(#22051): pass useBundleMode once landed so local-only / uncommitted",
+    "src/commands/ultraplan.tsx:20: // TODO(prod-hardening): OAuth token may go stale over the 30min poll;",
+    "src/commands/ultraplan.tsx:364: // TODO(#23985): replace registerRemoteAgentTask + startDetachedPoll with",
+    "src/components/Message.tsx:35: // TODO: Find a way to remove this, and leave spacing to the consumer",
+    "src/components/ResumeTask.tsx:168: // TODO: include branch name when API returns it",
+    "src/components/ScrollKeybindingHandler.tsx:568: // TODO(search): `/`, n/N — build on Richard Kim's d94b07add4 (branch",
+    "src/components/Settings/Config.tsx:263: // TODO: Add MCP servers",
+    "src/components/Settings/Config.tsx:1094: // TODO: Make these proper messages",
+    "src/components/Spinner.tsx:289: // the terminal is very small. TODO: fix this in Ink.",
+    "src/components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.tsx:188: // TODO: Delete the branch after moving to V2",
+    "src/components/permissions/PermissionRequest.tsx:145: // TODO: Move this to Tool.renderPermissionRequest",
+    "src/constants/outputStyles.ts:73: **TodoList Integration**: If using a TodoList for the overall task, include a specific todo item like \"Request human input on [specific decision]\" when planning to request human input. This ensures proper task tracking. Note: TodoList is not required for all tasks.",
+    "src/constants/outputStyles.ts:84: **Your Task:** [specific function/section in file, mention file and TODO(human) but do not include line numbers]",
+    "src/constants/outputStyles.ts:90: - You must first add a TODO(human) section into the codebase with your editing tools before making the Learn by Doing request",
+    "src/constants/outputStyles.ts:91: - Make sure there is one and only one TODO(human) section in the code",
+    "src/constants/outputStyles.ts:102: **Your Task:** In sudoku.js, implement the selectHintCell(board) function. Look for TODO(human). This function should analyze the board and return {row, col} for the best cell to hint, or null if the puzzle is complete.",
+    "src/constants/outputStyles.ts:113: **Your Task:** In upload.js, inside the validateFile() function's switch statement, implement the 'case \"document\":' branch. Look for TODO(human). This should validate document files (pdf, doc, docx).",
+    "src/constants/outputStyles.ts:124: **Your Task:** In calculator.js, inside the handleInput() function, add 2-3 console.log statements after the TODO(human) comment to help debug why number inputs fail.",
+    "src/entrypoints/mcp.ts:62: // TODO: Also re-expose any MCP tools"
+  ],
+  "brokenImportSamples": [
+    {
+      "file": "src/QueryEngine.ts",
+      "spec": "./commands.js"
+    },
+    {
+      "file": "src/Task.ts",
+      "spec": "./state/AppState.js"
+    },
+    {
+      "file": "src/Tool.ts",
+      "spec": "./commands.js"
+    },
+    {
+      "file": "src/assistant/sessionDiscovery.ts",
+      "spec": "../recovery/magicProxy.js"
+    },
+    {
+      "file": "src/assistant/sessionHistory.ts",
+      "spec": "../constants/oauth.js"
+    },
+    {
+      "file": "src/bridge/bridgeApi.ts",
+      "spec": "./debugUtils.js"
+    },
+    {
+      "file": "src/bridge/bridgeConfig.ts",
+      "spec": "../constants/oauth.js"
+    },
+    {
+      "file": "src/bridge/bridgeDebug.ts",
+      "spec": "../utils/debug.js"
+    },
+    {
+      "file": "src/bridge/bridgeEnabled.ts",
+      "spec": "../utils/auth.js"
+    },
+    {
+      "file": "src/bridge/bridgeMain.ts",
+      "spec": "../constants/product.js"
+    },
+    {
+      "file": "src/bridge/bridgeMessaging.ts",
+      "spec": "../entrypoints/agentSdkTypes.js"
+    },
+    {
+      "file": "src/bridge/bridgePermissionCallbacks.ts",
+      "spec": "../utils/permissions/PermissionUpdateSchema.js"
+    },
+    {
+      "file": "src/bridge/bridgePointer.ts",
+      "spec": "../utils/debug.js"
+    },
+    {
+      "file": "src/bridge/bridgeStatusUtil.ts",
+      "spec": "../ink/stringWidth.js"
+    },
+    {
+      "file": "src/bridge/bridgeUI.ts",
+      "spec": "../ink/stringWidth.js"
+    },
+    {
+      "file": "src/bridge/codeSessionApi.ts",
+      "spec": "../utils/debug.js"
+    },
+    {
+      "file": "src/bridge/createSession.ts",
+      "spec": "../entrypoints/agentSdkTypes.js"
+    },
+    {
+      "file": "src/bridge/debugUtils.ts",
+      "spec": "../utils/debug.js"
+    },
+    {
+      "file": "src/bridge/envLessBridgeConfig.ts",
+      "spec": "../services/analytics/growthbook.js"
+    },
+    {
+      "file": "src/bridge/inboundAttachments.ts",
+      "spec": "../bootstrap/state.js"
+    },
+    {
+      "file": "src/bridge/inboundMessages.ts",
+      "spec": "../entrypoints/agentSdkTypes.js"
+    },
+    {
+      "file": "src/bridge/initReplBridge.ts",
+      "spec": "../bootstrap/state.js"
+    },
+    {
+      "file": "src/bridge/jwtUtils.ts",
+      "spec": "../services/analytics/index.js"
+    },
+    {
+      "file": "src/bridge/pollConfig.ts",
+      "spec": "../services/analytics/growthbook.js"
+    },
+    {
+      "file": "src/bridge/remoteBridgeCore.ts",
+      "spec": "./workSecret.js"
+    },
+    {
+      "file": "src/bridge/replBridge.ts",
+      "spec": "./types.js"
+    },
+    {
+      "file": "src/bridge/replBridgeHandle.ts",
+      "spec": "../utils/concurrentSessions.js"
+    },
+    {
+      "file": "src/bridge/replBridgeTransport.ts",
+      "spec": "../cli/transports/ccrClient.js"
+    },
+    {
+      "file": "src/bridge/sessionRunner.ts",
+      "spec": "../utils/slowOperations.js"
+    },
+    {
+      "file": "src/bridge/trustedDevice.ts",
+      "spec": "../constants/oauth.js"
+    }
+  ],
+  "topBrokenImportSpecs": [
+    [
+      "../../commands.js",
+      102
+    ],
+    [
+      "../../bootstrap/state.js",
+      101
+    ],
+    [
+      "../../ink.js",
+      87
+    ],
+    [
+      "../ink.js",
+      67
+    ],
+    [
+      "../bootstrap/state.js",
+      59
+    ],
+    [
+      "../../Tool.js",
+      35
+    ],
+    [
+      "../debug.js",
+      29
+    ],
+    [
+      "../../recovery/magicProxy.js",
+      25
+    ],
+    [
+      "../commands.js",
+      23
+    ],
+    [
+      "../services/analytics/growthbook.js",
+      20
+    ],
+    [
+      "../../services/analytics/growthbook.js",
+      19
+    ],
+    [
+      "../../constants/oauth.js",
+      18
+    ],
+    [
+      "../recovery/magicProxy.js",
+      16
+    ],
+    [
+      "../../../ink.js",
+      16
+    ],
+    [
+      "./debug.js",
+      15
+    ],
+    [
+      "../utils/debug.js",
+      14
+    ],
+    [
+      "../../constants/figures.js",
+      13
+    ],
+    [
+      "../../utils/debug.js",
+      12
+    ],
+    [
+      "../../utils/lazySchema.js",
+      12
+    ],
+    [
+      "../state/AppState.js",
+      12
+    ]
+  ],
+  "topBrokenImportDirs": [
+    [
+      "src/utils",
+      221
+    ],
+    [
+      "src/components",
+      111
+    ],
+    [
+      "src/hooks",
+      73
+    ],
+    [
+      "src/utils/plugins",
+      43
+    ],
+    [
+      "src/ink",
+      38
+    ],
+    [
+      "src/components/messages",
+      33
+    ],
+    [
+      "src/bridge",
+      26
+    ],
+    [
+      "src/services/api",
+      19
+    ],
+    [
+      "src/services/mcp",
+      19
+    ],
+    [
+      "src",
+      18
+    ],
+    [
+      "src/utils/permissions",
+      18
+    ],
+    [
+      "src/commands/plugin",
+      17
+    ],
+    [
+      "src/components/PromptInput",
+      17
+    ],
+    [
+      "src/components/design-system",
+      16
+    ],
+    [
+      "src/hooks/notifs",
+      16
+    ],
+    [
+      "src/utils/hooks",
+      16
+    ],
+    [
+      "src/commands",
+      15
+    ],
+    [
+      "src/commands/install-github-app",
+      15
+    ],
+    [
+      "src/components/permissions",
+      15
+    ],
+    [
+      "src/skills/bundled",
+      15
+    ]
+  ],
+  "findings": [
+    "There are 1671 source files with broken relative imports."
+  ],
+  "plan": [
+    "Phase 1: confirm the runtime entrypoint and lock one runnable terminal-first path.",
+    "Phase 2: repair package metadata, scripts, and runtime bootstrap files.",
+    "Phase 3: reduce broken-import count by restoring real modules or safe compatibility shims.",
+    "Phase 4: isolate optional integrations (Chrome, Computer Use, Bridge) behind lazy startup checks instead of eager crashes.",
+    "Phase 5: test interactive terminal startup and one natural-language analysis task end-to-end."
+  ]
+}

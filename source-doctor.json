@@ -1,0 +1,38 @@
+{
+  "status": "partial_bootstrap",
+  "summary": {
+    "recovery_agent_boots": true,
+    "source_entrypoint_import_barrier_cleared": true,
+    "source_entrypoint_full_boot": false,
+    "source_entrypoint_behavior": "npx tsx src/main.tsx now stalls during startup instead of failing immediately on missing package resolution"
+  },
+  "changes": [
+    "patched bun:bundle imports to a local compatibility shim at src/shims/bun-bundle.ts",
+    "added package.json dependencies needed to push src/main.tsx beyond the first resolver failures",
+    "added file-based local vendor stubs for unavailable/private modules under vendor-stubs/",
+    "added package-lock.json so npm install is reproducible",
+    "added experimental source-compat scripts in scripts/source-smoke.js and scripts/source-doctor.js",
+    "kept the recovery agent path working as the fallback entrypoint"
+  ],
+  "vendor_stubs": [
+    "@ant/claude-for-chrome-mcp",
+    "@ant/computer-use-mcp",
+    "@ant/computer-use-input",
+    "@ant/computer-use-swift",
+    "@growthbook/growthbook",
+    "audio-capture.node",
+    "color-diff-napi",
+    "modifiers-napi"
+  ],
+  "last_attempt": {
+    "command": "npx --yes tsx src/main.tsx",
+    "timed_out_seconds": 8,
+    "result": "timeout_without_resolver_error"
+  },
+  "recommended_commands": [
+    "npm install",
+    "npm start",
+    "npm run source:main",
+    "npm run source:doctor"
+  ]
+}

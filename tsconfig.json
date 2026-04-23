@@ -1,29 +1,21 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
-    "moduleResolution": "Node",
-    "baseUrl": ".",
-    "paths": {
-      "src/*": [
-        "./*"
-      ]
-    },
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "strict": false,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "allowJs": true,
-    "jsx": "react-jsx"
+    "checkJs": false,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "jsx": "react-jsx",
+    "baseUrl": "."
   },
   "include": [
-    "**/*.ts",
-    "**/*.tsx",
-    "**/*.js"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist"
+    "src/**/*",
+    "recovery/**/*",
+    "agent.js",
+    "scripts/**/*"
   ]
 }
