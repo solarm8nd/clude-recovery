@@ -42,50 +42,11 @@ function readDotEnv(root = process.cwd()) {
   }
 }
 
-function pickFirst(...values) {
-  for (const value of values) {
-    if (value && String(value).trim()) return String(value).trim();
-  }
-  return '';
-}
-
-function normalizeBaseUrl(baseUrl) {
-  if (!baseUrl) return '';
-  const clean = String(baseUrl).trim().replace(/\/$/, '');
-  if (/\/v1$/i.test(clean)) return clean;
-  return clean + '/v1';
-}
-
 export function getLocalModelConfig(root = process.cwd()) {
   const envFile = readDotEnv(root);
-  const baseUrl = pickFirst(
-    process.env.LOCAL_LLM_BASE_URL,
-    envFile.LOCAL_LLM_BASE_URL,
-    process.env.OPENAI_BASE_URL,
-    envFile.OPENAI_BASE_URL,
-    process.env.OPENAI_API_BASE,
-    envFile.OPENAI_API_BASE,
-    process.env.OLLAMA_BASE_URL,
-    envFile.OLLAMA_BASE_URL,
-    process.env.OLLAMA_HOST,
-    envFile.OLLAMA_HOST
-  );
-
   return {
-    baseUrl: normalizeBaseUrl(baseUrl),
-    model: pickFirst(
-      process.env.LOCAL_LLM_MODEL,
-      envFile.LOCAL_LLM_MODEL,
-      process.env.OPENAI_MODEL,
-      envFile.OPENAI_MODEL,
-      process.env.OLLAMA_MODEL,
-      envFile.OLLAMA_MODEL
-    ),
-    apiKey: pickFirst(
-      process.env.LOCAL_LLM_API_KEY,
-      envFile.LOCAL_LLM_API_KEY,
-      process.env.OPENAI_API_KEY,
-      envFile.OPENAI_API_KEY
-    )
+    baseUrl: process.env.LOCAL_LLM_BASE_URL || envFile.LOCAL_LLM_BASE_URL || '',
+    model: process.env.LOCAL_LLM_MODEL || envFile.LOCAL_LLM_MODEL || '',
+    apiKey: process.env.LOCAL_LLM_API_KEY || envFile.LOCAL_LLM_API_KEY || ''
   };
 }
