@@ -5,6 +5,7 @@ import {
   doctor,
   featureApi,
   listDir,
+  planProject,
   readTextFile,
   runShell,
   safeResolve,
@@ -20,6 +21,16 @@ let cwd = process.cwd();
 let history = [];
 const MAX_STEPS = 8;
 let shouldExit = false;
+let readlineClosed = false;
+
+rl.on('close', () => {
+  readlineClosed = true;
+  shouldExit = true;
+});
+
+rl.on('SIGINT', () => {
+  console.log('\nInterrupted. The agent is still running. Use /exit to close it cleanly.\n');
+});
 
 function banner() {
   console.log(`
@@ -37,6 +48,7 @@ slash commands:
   /shell <command>
   /doctor
   /analyze [path]
+  /plan [path]
   /chrome status|start|native-host
   /computer status|start
   /bridge status|enable|disable
@@ -77,6 +89,7 @@ Allowed forms:
 {"type":"cd","path":"..."}
 {"type":"doctor"}
 {"type":"analyze","path":"..."}
+{"type":"plan","path":"..."}
 Use small safe steps. Prefer inspection before modification.`;
 }
 
@@ -87,6 +100,7 @@ function normalizeBareCommand(line) {
     if (trimmed === 'ls') return '/ls';
     if (trimmed === 'doctor') return '/doctor';
     if (trimmed === 'analyze') return '/analyze';
+    if (trimmed === 'plan') return '/plan';
     if (trimmed.startsWith('cd ')) return '/cd ' + trimmed.slice(3);
     if (trimmed.startsWith('read ')) return '/read ' + trimmed.slice(5);
     if (trimmed.startsWith('search ')) return '/search ' + trimmed.slice(7);
@@ -133,6 +147,7 @@ async function runModelBackedAgent(userText) {
         result = `cwd changed to ${cwd}`;
       } else if (action.type === 'doctor') result = doctor(cwd);
       else if (action.type === 'analyze') result = await analyzeProject(cwd, action.path || '.');
+      else if (action.type === 'plan') result = await planProject(cwd, action.path || '.');
       else result = `Unknown action type: ${action.type}`;
     } catch (error) {
       result = `Action failed: ${error?.message || String(error)}`;
@@ -239,11 +254,17 @@ async function handleSlash(line) {
         console.log(`\nSaved analysis files:\n- ${written.markdown}\n- ${written.json}`);
         break;
       }
+      case '/plan': {
+        const target = rest || '.';
+        console.log(await planProject(cwd, target));
+        break;
+      }
       default:
         console.log('Unknown command. Use /help');
     }
   } catch (error) {
-    if (error?.code === 'ABORT_ERR') {
+    if (error?.code === 'ABORT_ERR' || error?.code === 'ERR_USE_AFTER_CLOSE') {
+      if (readlineClosed) return;
       console.log('\nInterrupted. The agent is still running. Use /exit to close it cleanly.\n');
       return;
     }
@@ -263,18 +284,19 @@ async function processInput(rawLine) {
         console.log(`\nagent error:\n${error?.message || String(error)}\n`);
       }
     }
-    if (shouldExit) break;
+    if (shouldExit || readlineClosed) break;
   }
 }
 
 async function main() {
   banner();
-  while (!shouldExit) {
+  while (!shouldExit && !readlineClosed) {
     let line = '';
     try {
       line = await rl.question('clude> ');
     } catch (error) {
-      if (error?.code === 'ABORT_ERR') {
+      if (error?.code === 'ABORT_ERR' || error?.code === 'ERR_USE_AFTER_CLOSE') {
+        if (readlineClosed) break;
         console.log('\nInterrupted. The agent is still running. Use /exit to close it cleanly.\n');
         continue;
       }
